@@ -1,0 +1,246 @@
+---
+title: "Aviation"
+author: "Mikko Salonen"
+date: "17 March 2017"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_depth: 3
+    fig_caption: true
+    fig_width: 12
+    fig_height: 10
+    code_folding: hide
+---
+
+#Intro
+I use data from openflights.org to draw couple of interesting figures. I mostly concentrate on Finnair, One World member, and on Lufthansa, member of Star Alliance.
+
+
+##Cleaning and combining the data
+The data from openflights.org is divided into three parts: routes, airlines, and airports. Routes shares a indentifier key with both airlines and with  airports tables. First, I attach airline info to routes and clean unneeded columns. Second, routes and airports datasets are merged. At this point, note that there are two identifiers for airport key: routes departure and arrival info. For this reason I will do the merging in two parts. You can view the code by pushing 'Code'-button on the right side of the page.
+```{r,echo=TRUE,message=FALSE,results='hide'}
+# Flight route data from http://openflights.org/data.html
+require(tidyr)
+require(dplyr)
+require(data.table)
+require(rworldmap) #alse required: rworldxtra for higher resolution
+require(plyr)
+require(ggmap)
+require(ggplot2)
+require(geosphere)
+library(grid)
+
+#read data on routes, airlines, and airports, information about the data included below (from openflights.org/data.html)
+
+#########################
+# routes data variables (openflights.org/data.html)
+#########################
+#Airline	2-letter (IATA) or 3-letter (ICAO) code of the airline.
+#Airline ID	Unique OpenFlights identifier for airline (see Airline).
+#Source airport	3-letter (IATA) or 4-letter (ICAO) code of the source airport.
+#Source airport ID	Unique OpenFlights identifier for source airport (see Airport)
+#Destination airport	3-letter (IATA) or 4-letter (ICAO) code of the destination airport.
+#Destination airport ID	Unique OpenFlights identifier for destination airport (see Airport)
+#Codeshare	"Y" if this flight is a codeshare (that is, not operated by Airline, 
+#but another carrier), empty otherwise.
+#Stops	Number of stops on this flight ("0" for direct)
+#Equipment	3-letter codes for plane type(s) generally used on this flight, separated by spaces
+#The data is ISO 8859-1 (Latin-1) encoded. 
+#The special value \N is used for "NULL" to indicate that no value is available, 
+#and is understood automatically by MySQL if imported.
+#setwd("Documents/flights/")
+routes <- fread("routes.dat",sep = ",",na.strings = "\\N",
+                showProgress = TRUE,header = FALSE,
+                col.names = c("airline","airlineID", "dep","depID","arriv","arrivID","codeshare","stops","equipment"))
+
+#########################
+# Airline data variables (openflights.org/data.html):
+#########################
+#Airline ID	Unique OpenFlights identifier for this airline.
+#Name	Name of the airline.
+#Alias	Alias of the airline. For example, All Nippon Airways is commonly known as "ANA".
+#IATA	2-letter IATA code, if available.
+#ICAO	3-letter ICAO code, if available.
+#Callsign	Airline callsign.
+#Country	Country or territory where airline is incorporated.
+#Active	"Y" if the airline is or has until recently been operational, 
+#"N" if it is defunct. This field is not reliable: in particular, 
+#major airlines that stopped flying long ago, 
+#but have not had their IATA code reassigned (eg. Ansett/AN), 
+#will incorrectly show as "Y".
+
+airlines <- fread("airlines.dat",sep = ",",na.strings = "\\N",
+                  showProgress = TRUE,header = FALSE,
+                  col.names = c("airlineID", "airlineName","alias","IATA","ICAO","callsign","country","active"))
+
+########################
+#Airport data variables (openflights.org/data.html):
+########################
+#Airport ID	Unique OpenFlights identifier for this airport.
+#Name	Name of airport. May or may not contain the City name.
+#City	Main city served by airport. May be spelled differently from Name.
+#Country	Country or territory where airport is located. See countries.dat to cross-reference to ISO 3166-1 codes.
+#IATA	3-letter IATA code. Null if not assigned/unknown.
+#ICAO	4-letter ICAO code. Null if not assigned.
+#Latitude	Decimal degrees, usually to six significant digits. Negative is South, positive is North.
+#Longitude	Decimal degrees, usually to six significant digits. Negative is West, positive is East.
+#Altitude	In feet.
+#Timezone	Hours offset from UTC. Fractional hours are expressed as decimals, eg. India is 5.5.
+#DST	Daylight savings time. One of E (Europe), A (US/Canada), S (South America), O (Australia), Z (New Zealand), N (None) or U (Unknown). See also: Help: Time
+# [named timezone2] Tz database time zone	Timezone in "tz" (Olson) format, eg. "America/Los_Angeles".
+#Type	Type of the airport. Value "airport" for air terminals, "station" for train stations, "port" for ferry terminals and "unknown" if not known. In airports.csv, only type=airport is included.
+#Source	Source of this data. "OurAirports" for data sourced from OurAirports, "Legacy" for old data not matched to OurAirports (mostly DAFIF), "User" for unverified user contributions. In airports.csv, only source=OurAirports is included.
+airports <- fread("airports.dat",sep = ",",na.strings = "\\N",
+                  showProgress = TRUE,header = FALSE,
+                  col.names = c("airportID", "airportName","city","country","IATA","ICAO","lat","lon","altitude","timezone","DST","timezone2","type","source"))
+#Inspect data and remove unused/unimportant variables
+#i) routes
+glimpse(routes)
+summary(routes)
+
+#most routes are without stops in the middle, as one would expect
+
+#ii) airlines
+airlines
+glimpse(airlines)
+airlines[country=="Finland"]
+#remove alias from the dataset
+airlines <- select(airlines, -one_of(c("alias")))
+
+#iii) airports
+airports
+glimpse(airports)
+#remove type and source since they are allways the same
+airports <- select(airports, -one_of(c("type","source")))
+
+#add airlines to routes data using airlineID and clean data
+r2 <- merge(routes, airlines, by.x ="airlineID", by.y = "airlineID")
+r2
+routes
+airlines
+keep1 <- c("airlineName","callsign","country","equipment","active","dep","depID","arriv","arrivID")
+r3 <- select(r2, one_of(keep1))
+r3 <- dplyr::rename(r3, airline = airlineName,airlineCountry = country) 
+#add departure data from airport data
+keep2 <- c("airportID","airportName","city","country","lat","lon","altitude")
+airports2 <- dplyr::select(airports, one_of(keep2))
+r4 <- merge(r3, airports2, by.x="depID", by.y="airportID")
+r4 <- dplyr::rename(r4, airportDep = airportName, cityDep = city, countryDep = country,latDep = lat, lonDep = lon, altDep = altitude)
+
+#Clean a bit..
+keep3 <- c("airline","callsign","airlineCountry","equipment","active","dep","airportDep","cityDep","countryDep","latDep","lonDep","lonDep","arriv","arrivID")
+r5 <- dplyr::select(r4, one_of(keep3))
+
+#Add arrival info by merging and clean data
+r6 <- merge(r5,airports2, by.x="arrivID", by.y="airportID")
+r6 <- dplyr::rename(r6, airportArriv = airportName, cityArriv = city, countryArriv = country,latArriv = lat, lonArriv = lon, altArriv = altitude)
+keep4 <- c("airline","callsign","airlineCountry","equipment","active","dep","airportDep","cityDep","countryDep","latDep","lonDep","lonDep","arriv","airportArriv","cityArriv","countryArriv","latArriv","lonArriv","lonArriv")
+flight <- dplyr::select(r6, one_of(keep4))
+
+#Last but not least: make distinct datasets for finnair and Lufthansa routes
+finnair <- flight[airline == "Finnair"]
+lufthansa <- flight[airline == "Lufthansa"]
+
+```
+
+
+#Short Analysis
+
+### Top Countries
+
+We start analysing the data by looking at the coutries Finnair and Lufthansa have the most routes in. Below there are four distinct figures -- for clarity -- showing the number of routes for each country. Note that one route is in form: 'From - To'. This means, that route 'HEL - BCN - HEL' is counted as two routes. 
+
+
+
+```{r,echo=TRUE,message=FALSE,results='hide'}
+plot(sort(table(rbind(finnair$countryArriv,finnair$countryDep)),decreasing = TRUE)[2:11],cex.lab = 1.2, cex.axis=0.9,
+     main = "Number of routes by country (Finnair) w.o Finland", xlab ="Country",ylab="Number of routes")
+plot(sort(table(rbind(finnair$countryArriv,finnair$countryDep)),decreasing = TRUE)[12:20],cex.lab = 1.3, cex.axis=1,
+     main = "Finnair top 12-20 routes by country", xlab ="Country",ylab="Number of routes")
+plot(sort(table(rbind(lufthansa$countryArriv,lufthansa$countryDep)),decreasing = TRUE)[2:11],cex.lab = 1.3, cex.axis=1,
+     main = "Number of routes by country (Lufthansa) w.o Germany", xlab ="Country",ylab="Number of routes")
+plot(sort(table(rbind(lufthansa$countryArriv,lufthansa$countryDep)),decreasing = TRUE)[12:20],cex.lab = 1.3, cex.axis=1,
+     main = "Lufthansa top 12-20 routes by country", xlab ="Country",ylab="Number of routes")
+
+```
+
+We can see that the main market outside of Europe for both companies seems to be North America. Another thing to notice is that Lufthansa has more routes than Finnair. 
+
+### Route Network
+
+Now let's look at airports Finnair and Lufthansa are operating at and the routes to/from their main airports: Helsinki-Vantaa and Frankfurt, respectively. Blue crosses are airports Finnair is operating at, and orange star shows airports where Lufthansa is operating. Similarly, blue lines from Helsinki show the direct routes from Helsinki-Vantaa airport operated by Finnair (according to openflights.org dataset). Orange lines show direct routes from Frankfurt operated by Lufthansa. Clearly, Lufthansa has a wider network of routes, but there are some locations to which Lufthansa does not cover and Finnair does.
+
+```{r,echo=TRUE,message=FALSE,results='hide'}
+newmap <- getMap(resolution = 'high')
+plot(newmap, xlim = c(-120,150), ylim = c(-40,90),
+     main="Finnair/Lufthansa route airports and direct flights from Helsinki/Frankfurt")
+points(x = rbind(finnair$lonDep,finnair$lonArriv),y= rbind(finnair$latDep,finnair$latArriv), col=alpha("navyblue",0.6),cex= 1.5,pch="+")
+points(x = rbind(lufthansa$lonDep,lufthansa$lonArriv),y= rbind(lufthansa$latDep,lufthansa$latArriv), col=alpha("orange",0.5),cex= 1.4,pch="*")
+
+
+suoratHelsinki <- dplyr::filter(finnair, cityDep == 'Helsinki' | cityArriv == 'Helsinki')
+suoratFrankfurt <- dplyr::filter(lufthansa, cityDep == 'Frankfurt' | cityArriv == 'Frankfurt')
+lines(rbind(suoratHelsinki$lonDep,suoratHelsinki$lonArriv),rbind(suoratHelsinki$latDep,suoratHelsinki$latArriv),col=alpha("navyblue",0.6),lty=1)
+lines(rbind(suoratFrankfurt$lonDep,suoratFrankfurt$lonArriv),rbind(suoratFrankfurt$latDep,suoratFrankfurt$latArriv),col=alpha("orange",0.5),lty=2)
+legend(x = 120,y = 100,legend = c("HEL","FRA"),lty=c(1,1),bty = "n" ,col=c(alpha("navyblue",0.6),alpha("orange",0.5)))
+legend(x = 70,y = 100,legend = c("Finnair","Lufthansa"),pch = "+*",bty = "n" ,col=c(alpha("navyblue",0.6),alpha("orange",0.5)))
+
+```
+
+### Comparative advantage
+
+This step is a bit trickier: we first calculate the top 100 airports (according to number of routes/connections), then we calculate the spherical norm (using ellipsoid model to be specific), finally we say that an airline has advantage flying to a destination if their main airport is closer to that destination. Clearly this is not an adequate model of 'advantage', but it still gives the reader some idea how much the standard Mercator projection distorts distances. The main idea behind this model is that an airline wants to connect to highest traffic airports and they are more cost (both in time and money) effective if theyr main airport is closer than the rivals main airport.
+
+In the figure below, the sphere size is proportional to the amount of traffic in the airport (in terms of routes connected). Blue balls tell the reader that Helsinki-Vantaa airport is closer and orage bell that Frankfurt is closer. Interestingly, both Los Angeles and Abu Dhabi are closer to Helsinki than Frankfurt. However, Frankfurt is closer to East Coast of North America. There are no airports in the top 100 to which the distance would be smaller when traveling through Helsinki from Frankfurt. This means that even if travellers would not care about layovers, it would not make sense to make a stop at Helsinki before travelling to China from Frankfurt.
+
+```{r, echo=TRUE, message=FALSE, results='hide'}
+traffic <- ddply(flight, .(airportArriv), "nrow")
+names(traffic)[2] <- "flights"
+#sort(traffic$flights,decreasing = TRUE)
+top100traffic <- traffic[order(traffic$flights,decreasing = TRUE),][1:100,]
+top100traffic <- merge(top100traffic,airports2,by.x="airportArriv",by.y="airportName")
+#airports
+#head(top100traffic)
+
+#Check lat & lon for Helsinki and Frankfurt
+airports2[city=="Helsinki"]
+airports2[city=="Frankfurt"]
+topairports <- cbind(top100traffic$airportArriv, round(distGeo(p1 = c(24.96330,60.31720),p2=cbind(top100traffic$lon,top100traffic$lat))/1000,digits = 0),
+      round(distGeo(p1 = c(8.570556,50.03333),p2=cbind(top100traffic$lon,top100traffic$lat))/1000,digits = 0),
+      top100traffic$flights,top100traffic$lon,top100traffic$lat)
+colnames(topairports) <- c("Airport","DistHel","DistFra","Flights","Lon","Lat")
+topairports <- as.data.frame(topairports)
+topairports <- mutate(topairports, Flights = as.numeric(as.character(Flights)),
+                      DistFra = as.numeric(as.character(DistFra)),DistHel = as.numeric(as.character(DistHel)),
+                      Lon = as.numeric(as.character(Lon)), Lat = as.numeric(as.character(Lat)))
+#as.numeric(as.character(topairports$DistFra))
+#str(topairports)
+topairports <- mutate(topairports, DiffHelFra = DistHel - DistFra)
+#topairports
+round(distGeo(p1 = c(24.96330,60.31720),p2=c(8.570556,50.03333))/1000,digits = 0)
+
+topairports[order(topairports$DiffHelFra,decreasing = TRUE),]
+topairports <- as.data.table(mutate(topairports, HelCloser = ifelse(topairports$DiffHelFra<0,TRUE,FALSE)))
+sum(topairports[HelCloser==TRUE]$Flights) - sum(topairports[HelCloser==FALSE]$Flights) #more flights in top100 closer to FRA
+
+
+###Now let's plot top 100 airports relative to flight traffic and wheter or not Helsinki would be closer than Frankfurt
+newmap <- getMap(resolution = 'high')
+plot(newmap, xlim = c(-120,150), ylim = c(-40,90),
+     main="Top 100 Airports",sub="with proportional traffic amounts")
+points(x = topairports$Lon,y= topairports$Lat, col=ifelse(topairports$DiffHelFra<0,alpha("navyblue",0.6),alpha("orange",0.4)),cex=topairports$Flights/sum(topairports$Flights)*100+1,pch=20)
+legend(x = 100,y=100,legend = c("HEL closer","FRA closer"),bty = "n",pch = c(20,20),col=c(alpha("navyblue",0.6),alpha("orange",0.4)))
+
+```
+
+### Ideas for more advanced analysis
+
+* Network model using coalitional connections (Oneworld vs. StarAlliance etc.)
+* Shapley value
+* Many ideas require more detailed data
+
+Link to tutorial used: <http://www.milanor.net/blog/maps-in-r-plotting-data-points-on-a-map/>
+
+
+
